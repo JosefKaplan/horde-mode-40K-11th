@@ -1,0 +1,6 @@
+.DS_Store
+__pycache__/
+.idea/
+
+# Source documents kept for reference only (other people's community material): never commit
+reference/
