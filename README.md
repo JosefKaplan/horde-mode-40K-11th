@@ -1,5 +1,7 @@
 # Horde Mode 40K 11th
 
+**Live:** https://josefkaplan.github.io/horde-mode-40K-11th/
+
 Repository `horde-mode-40K-11th`. The app is titled "Necron Horde Mode": only the Necron Horde for now, more factions later.
 
 Companion app for **40K Horde Mode (11th edition, v0.9)** with a **Necron Horde**. It runs the turn sequence, rolls and ranks the Horde's spawns, tells you what each Horde unit does under the Horde AI rules, and deals the Misery, Secondary and Secret Objective cards. For 1 to 4 players on one phone or laptop. Built for phones. One file, no build.
@@ -39,7 +41,7 @@ python3 tests/test_app.py
 
 ## Deploy to GitHub Pages
 
-This folder is not a git repository yet. Create an empty **public** repository named `horde-mode-40K-11th` on GitHub (no README, licence or .gitignore), then in this folder:
+First-time setup (already done for this folder): create an empty **public** repository named `horde-mode-40K-11th` on GitHub (no README, licence or .gitignore), then in this folder:
 
 ```bash
 git init -b main
