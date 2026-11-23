@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Smoke test for Necron Horde Mode (index.html).
+"""Smoke test for Horde Mode 40K (index.html), with every Horde faction it embeds.
 
 Setup once:   pip install playwright && python3 -m playwright install chromium
 Run:          python3 tests/test_app.py            (tests ../index.html)
@@ -10,8 +10,8 @@ Use a local Chrome instead of Playwright's Chromium:  CHROME_PATH=/path/to/chrom
 Exits non-zero on the first failed check and prints which one. Nothing leaves the machine: Google Fonts are blocked,
 and only a server on localhost or 127.0.0.1 is accepted.
 
-The embedded spawn tables and unit data are compared with the source files in reference/<faction>/ (git-ignored, see
-README.md) when they are present; without them those checks are skipped and the rest still run.
+The embedded spawn tables and unit data of each faction are compared with the source files in reference/<faction>/
+(git-ignored, see README.md) when they are present; without them those checks are skipped and the rest still run.
 """
 import importlib.util
 import json
@@ -143,7 +143,7 @@ def main():
         pg.wait_for_selector("#tracker .tracker")
 
         # ---------- Boot ----------
-        check("title", "Necron Horde Mode" in pg.title())
+        check("title names the faction", pg.title() == "Necrons Horde Mode 40K", pg.title())
         check("five tabs", pg.locator(".tab").count() == 5)
         check("starts at setup, round 0", ev(pg, "state.stage === 'setup' && state.round === 0"))
         check("robots noindex kept", pg.locator('meta[name="robots"][content="noindex, nofollow"]').count() == 1)
@@ -151,20 +151,25 @@ def main():
         bad_refs = [r for r in refs if not (r.startswith(("https://fonts.googleapis.com", "https://fonts.gstatic.com", "data:", "#")))]
         check("page references no files by relative or root-absolute path (portfolio-safe)", not bad_refs, str(bad_refs[:3]))
 
-        # ---------- Data ----------
-        problems = pg.evaluate(DATA_CHECK)
-        check("data integrity", not problems, "; ".join(problems[:6]))
+        # ---------- Data, for every faction ----------
         tool = load_embed_tool()
-        faction = ev(pg, "FACTION.key")
-        check("the embedded data and FACTION name the same faction", ev(pg, "UNITS.faction") == faction and faction in tool.FACTIONS)
-        if all(path.exists() for path in tool.source_paths(faction).values()):
-            spawn, units = tool.build(faction)
-            check(f"embedded spawn tables equal reference/{faction}/spawn-*.csv", ev(pg, "SPAWN") == spawn, "run tools/embed_data.py")
-            check(f"embedded unit data equals what reference/{faction}/wahapedia-datasheets.html gives", ev(pg, "UNITS") == units, "run tools/embed_data.py")
-        else:
-            print(f"skip  source comparison: reference/{faction}/ is missing (see README.md, Updating the data)")
-        check("unit data is 11th edition", "11th edition" in ev(pg, "UNITS.version"), ev(pg, "UNITS.version"))
-        check("spawn sheet has a date", re.match(r"\d+/\d+/\d{4}", ev(pg, "SPAWN.updated")) is not None)
+        factions = ev(pg, "Object.keys(FACTIONS)")
+        check("the app has the factions tools/embed_data.py embeds, in the same order", factions == list(tool.FACTIONS) and ev(pg, "Object.keys(SPAWN_BY_FACTION)") == factions and ev(pg, "Object.keys(UNITS_BY_FACTION)") == factions, str(factions))
+        check("a new game has the Necron Horde", ev(pg, "state.setup.faction === 'necrons' && FACTION.key === 'necrons' && UNITS.faction === 'necrons'"))
+        for faction in factions:
+            ev(pg, f"useFaction('{faction}')")
+            problems = pg.evaluate(DATA_CHECK)
+            check(f"{faction}: data integrity", not problems, "; ".join(problems[:6]))
+            check(f"{faction}: FACTION, SPAWN and UNITS are that faction's", ev(pg, "[FACTION.key, UNITS.faction]") == [faction, faction] and ev(pg, f"SPAWN === SPAWN_BY_FACTION['{faction}']"))
+            if all(path.exists() for path in tool.source_paths(faction).values()):
+                spawn, units = tool.build(faction)
+                check(f"{faction}: embedded spawn tables equal reference/{faction}/spawn-*.csv", ev(pg, "SPAWN") == spawn, "run tools/embed_data.py")
+                check(f"{faction}: embedded unit data equals what reference/{faction}/wahapedia-datasheets.html gives", ev(pg, "UNITS") == units, "run tools/embed_data.py")
+            else:
+                print(f"skip  source comparison: reference/{faction}/ is missing (see README.md, Updating the data)")
+            check(f"{faction}: unit data is 11th edition", "11th edition" in ev(pg, "UNITS.version"), ev(pg, "UNITS.version"))
+            check(f"{faction}: spawn sheet has a date", re.match(r"\d+/\d+/\d{4}", ev(pg, "SPAWN.updated")) is not None)
+        ev(pg, "useFaction(state.setup.faction)")
         check("collection catalog has characters and units", ev(pg, "catalog().length") > 40 and ev(pg, "catalogName('imotekh the stormlord')") == "Imotekh the Stormlord")
         check("entry parsing", ev(pg, "(() => { const e = parseEntry('Immortals (10) + Imotekh the Stormlord + Chronomancer'); return e.size === 10 && e.need.immortals === 10 && e.need['imotekh the stormlord'] === 1 && e.need.chronomancer === 1; })()"))
         check("placeholders are not units", ev(pg, "(() => { const e = parseEntry('Necron Warriors (20) + Leader + Support'); return e.placeholders.length === 2 && Object.keys(e.need).length === 1; })()"))
@@ -251,13 +256,25 @@ def main():
         check("aircraft and fortifications are never in the top 3", not any(top))
         check("the [7-9] bracket really contains an aircraft and a fortification", ev(pg, "rankOptions('7-9', 'seed').filter(o => o.entry.lastResort).map(o => o.entry.lastResort).sort()") == ["Aircraft", "Fortification"])
         check("last-resort options are ranked below every other option", ev(pg, "(() => { const r = rankOptions('7-9', 'seed'); const first = r.findIndex(o => o.entry.lastResort); return r.slice(0, first).every(o => !o.entry.lastResort) && r.slice(first).every(o => o.entry.lastResort); })()"))
-        ev(pg, "state.collection['immortals'] = 5; render()")
+        ev(pg, "catalog().forEach(c => { state.collection[c.key] = 20; }); state.collection['immortals'] = 5; render()")
         short = ev(pg, "rankOptions('7-9', 'seed').filter(o => !o.available).map(o => o.raw)")
         check("owning 5 Immortals removes the 10-model entries", short and all("Immortals (10)" in n for n in short))
         best_avail = ev(pg, "rankOptions('7-9', 'seed')[0].available")
         check("unavailable options sort last", best_avail is True and ev(pg, "(() => { const r = rankOptions('7-9', 'seed'); const f = r.findIndex(o => !o.available); return r.slice(f).every(o => !o.available); })()"))
         check("reason chips explain the ranking", pg.locator(".slot .opt .chip").count() >= 3)
-        ev(pg, "delete state.collection['immortals']; render()")
+        ev(pg, "state.collection = { 'necron warriors': 20, immortals: 10 }; render()")
+        only = ev(pg, "rankOptions('7-9', 'seed').filter(o => o.available).map(o => Object.keys(o.entry.need))")
+        check("with units listed in the collection, only those can spawn", only and all(set(k) <= {"necron warriors", "immortals"} for k in only))
+        check("an unlisted unit counts as none owned", ev(pg, "freeModels('skorpekh destroyers') === 0 && rankOptions('7-9', 'seed').some(o => !o.available && o.reasons.some(r => r.text.includes('more Skorpekh Destroyers')))"))
+        check("listed units show 'You have the models'", ev(pg, "rankOptions('7-9', 'seed').filter(o => o.available).every(o => o.reasons.some(r => r.text === 'You have the models'))"))
+        ev(pg, "state.collection = { 'necron warriors': 5 }; render()")
+        check("with nothing in the bracket owned, the missing options can still be opened", "Nothing in this bracket fits" in pg.inner_text("#main") and pg.locator('.slot button[data-act="exp"]', has_text="with missing models").count() >= 1)
+        pg.locator('.slot button[data-act="exp"]', has_text="with missing models").first.click()
+        check("the opened list shows the options with missing models", pg.locator(".slot .opt.na").count() == 25)
+        pg.locator('.slot button[data-act="exp"]', has_text="Hide missing models").first.click()
+        ev(pg, "state.collection = { legionaries: 20 }; render()")
+        check("another faction's units do not limit this one", ev(pg, "!collectionInUse() && rankOptions('7-9', 'seed').every(o => o.available)"))
+        ev(pg, "state.collection = {}; render()")
 
         # spawn, variety and roster
         pg.click('.slot .opt >> nth=0 >> [data-act="pick"]')
@@ -656,12 +673,14 @@ def main():
         pg.wait_for_selector("#tracker .tracker")
         check("game survives a reload", ev(pg, "state.stage === 'h-command' && state.players[0].name === 'Saved' && state.collection.immortals === 12"))
         ev(pg, "mutate(s => { s.horde.push({ uid: s.uid++, zone: 'old', round: 1, raw: 'Lychguard (10)', baseKey: 'lychguard', need: { lychguard: 10 } }); })")
-        old = ev(pg, "(() => { const copy = JSON.parse(localStorage.getItem('%s')); ['saved', 'rnd', 'carry', 'removedShop', 'bought', 'secX', 'standing', 'buyer', 'secretDealt', 'destroyed', 'secAt', 'buys', 'secStats'].forEach(k => delete copy[k]); copy.players.forEach(p => { delete p.spRound; delete p.lzUsed; delete p.secret; }); copy.zones.forEach(z => delete z.cleared); copy.horde.forEach(h => { delete h.bracket; delete h.zoneNo; }); return JSON.stringify(copy); })()" % KEY)
+        old = ev(pg, "(() => { const copy = JSON.parse(localStorage.getItem('%s')); ['saved', 'rnd', 'carry', 'removedShop', 'bought', 'secX', 'standing', 'buyer', 'secretDealt', 'destroyed', 'secAt', 'buys', 'secStats'].forEach(k => delete copy[k]); copy.players.forEach(p => { delete p.spRound; delete p.lzUsed; delete p.secret; }); copy.zones.forEach(z => delete z.cleared); copy.horde.forEach(h => { delete h.bracket; delete h.zoneNo; }); delete copy.setup.faction; return JSON.stringify(copy); })()" % KEY)
         pg.evaluate("v => localStorage.setItem('%s', v)" % KEY, old)
         pg.reload()
         pg.wait_for_selector("#tracker .tracker")
-        migrated = ev(pg, "[Array.isArray(state.saved), state.rnd.misery, state.carry.force.length, typeof state.standing, state.players[0].secret.kept, state.players[0].spRound, state.destroyed.length, state.buys.length, state.secStats.won, state.zones[0].cleared, state.horde[0].bracket, state.horde[0].zoneNo]")
-        check("a save without the newest fields migrates", migrated == [True, 0, 0, "object", None, 0, 0, 0, 0, None, "5-6", None], str(migrated))
+        migrated = ev(pg, "[Array.isArray(state.saved), state.rnd.misery, state.carry.force.length, typeof state.standing, state.players[0].secret.kept, state.players[0].spRound, state.destroyed.length, state.buys.length, state.secStats.won, state.zones[0].cleared, state.horde[0].bracket, state.horde[0].zoneNo, state.setup.faction, FACTION.key]")
+        check("a save without the newest fields migrates (a save from before factions is a Necron game)", migrated == [True, 0, 0, "object", None, 0, 0, 0, 0, None, "5-6", None, "necrons", "necrons"], str(migrated))
+        unknown = ev(pg, "(() => { const copy = JSON.parse(localStorage.getItem('%s')); copy.setup.faction = 'no-such-faction'; return migrate(copy).setup.faction; })()" % KEY)
+        check("a save with an unknown faction falls back to the default", unknown == "necrons")
         pg.evaluate("localStorage.setItem('%s', '{broken json')" % KEY)
         pg.reload()
         pg.wait_for_selector("#tracker .tracker")
@@ -692,7 +711,9 @@ def main():
         check("Tomb Blades have Scouts 9\"", prof["blades"]["scouts"] == '9"')
         check("Standard sheet + Leader lists the leaders that can attach", ev(pg, "attachOptions('immortals', 'leader')") == ["Imotekh the Stormlord", "Overlord", "Overlord with Translocation Shroud", "Royal Warden", "Trazyn the Infinite"])
         check("Standard sheet + Support lists the Crypteks that can attach", "Technomancer" in ev(pg, "attachOptions('canoptek wraiths', 'support')"))
-        check("Horde rule texts: Command phase, battle-shock, no Reanimation Protocols", "battle-shock" in ev(pg, "STEP_ITEMS['h-command'].join(' ')").lower() and "Reanimation Protocols" in ev(pg, "STEP_ITEMS['h-command'].join(' ')"))
+        check("Horde rule texts: Command phase, battle-shock, no Reanimation Protocols", "battle-shock" in ev(pg, "stepItems('h-command').join(' ')").lower() and "Reanimation Protocols" in ev(pg, "stepItems('h-command').join(' ')"))
+        imotekh = ev(pg, "(() => { const p = hordeProfile('imotekh the stormlord'); return [p.ignored, p.command]; })()")
+        check("an ability that only gains CP is ignored (Imotekh's Grand Strategist): the Horde gains no CP", "Grand Strategist" in imotekh[0] and "Grand Strategist" not in imotekh[1], str(imotekh))
         n_sheets = ev(pg, "(() => { let n = 0; for (const sh of ['standard', 'detailed']) for (const b of BRACKET_KEYS) for (const raw of SPAWN[sh][b]) { if (renderUnitSheet(raw).includes('Horde rules')) n++; } return n; })()")
         check("every spawn-table entry has a unit sheet with Horde rules", n_sheets == ev(pg, "BRACKET_KEYS.reduce((t, b) => t + SPAWN.standard[b].length + SPAWN.detailed[b].length, 0)"))
 
@@ -739,6 +760,75 @@ def main():
         check("the Turn tab tells per unit who charges", "Horde units this phase" in panel and "Does not charge" in panel and "Charges the closest legal target" in panel)
         ev(pg, "mutate(s => { s.stage = 'h-shoot'; })")
         check("the Shooting phase panel shows [PRECISION] targeting", "Leader or Support model first" in pg.inner_text("#main"))
+
+        # ---------- Horde faction switch ----------
+        fresh(pg)
+        tab(pg, "setup")
+        check("Setup offers every faction", pg.locator('[data-act="set"][data-k="faction"]').count() == len(factions))
+        z0 = ev(pg, "state.zones[0].id")
+        ev(pg, f"mutate(s => {{ const z = zoneOf(s, '{z0}'); z.dice = [4, 3]; rebuildSlots(z, s); drawRandom(s, z.id, 1); }})")
+        check("a random Necron draft waits in the zone", ev(pg, f"zoneOf(state, '{z0}').slots[0].draft") in ev(pg, "SPAWN_BY_FACTION.necrons.standard['7-9']"))
+        pg.click('[data-act="set"][data-k="faction"][data-v="chaos-space-marines"]')
+        check("choosing Chaos Space Marines switches the data and the title", ev(pg, "[state.setup.faction, FACTION.key, UNITS.faction]") == ["chaos-space-marines"] * 3 and pg.title() == "Chaos Space Marines Horde Mode 40K")
+        check("the zone keeps its dice but drops the Necron draft", ev(pg, f"(() => {{ const z = zoneOf(state, '{z0}'); return [z.dice, z.slots.length, z.slots[0].bracket, z.slots[0].draft]; }})()") == [[4, 3], 1, "7-9", None])
+        check("ranked options now come from the Chaos Space Marines table", ev(pg, "rankOptions('7-9', 'seed').every(o => SPAWN_BY_FACTION['chaos-space-marines'].standard['7-9'].includes(o.raw))"))
+        check("the Setup tab shows the faction rule and the faction's collection", "Wonton Slaughter" in pg.inner_text("#main") and "Your Chaos Space Marines collection" in pg.inner_text("#main"))
+        tab(pg, "turn")
+        check("the setup checklist names the faction and its rule", "Chaos Space Marines, Primary Faction Rule Wonton Slaughter" in pg.inner_text("#main") and "no Dark Pacts" in pg.inner_text("#main"))
+        pg.click('[data-act="undo"]')
+        check("undo switches the faction back", ev(pg, "[state.setup.faction, FACTION.key]") == ["necrons", "necrons"])
+        tab(pg, "setup")
+        pg.click('[data-act="set"][data-k="faction"][data-v="chaos-space-marines"]')
+        ev(pg, f"mutate(s => pickUnit(s, '{z0}', 1, 'Chosen (10)'))")
+        check("the faction is locked once a Horde unit has spawned", pg.locator('[data-act="set"][data-k="faction"][data-v="necrons"]').is_disabled() and "Locked while Horde units are on the table" in pg.inner_text("#main"))
+        ev(pg, "mutate(s => applySetup(s, 'faction', 'necrons'))")
+        check("and the switch refuses to change it", ev(pg, "state.setup.faction") == "chaos-space-marines")
+        ev(pg, "mutate(s => resetSpawn(s))")
+        check("Redo spawn unlocks it again", not pg.locator('[data-act="set"][data-k="faction"][data-v="necrons"]').is_disabled())
+        pg.reload()
+        pg.wait_for_selector("#tracker .tracker")
+        check("the faction survives a reload", ev(pg, "[state.setup.faction, FACTION.key]") == ["chaos-space-marines"] * 2)
+        tab(pg, "setup")
+        pg.click('[data-act="sheet"][data-type="newgame"]')
+        pg.click('[data-act="newgame-do"]')
+        check("a new game keeps the faction", ev(pg, "[state.setup.faction, FACTION.key]") == ["chaos-space-marines"] * 2)
+
+        # ---------- Chaos Space Marines Horde: data and unit rules ----------
+        entry = ev(pg, "(() => { const e = parseEntry('Chosen (10) + Abaddon The Despoiler + Masters of the Maelstrom (5)'); return [e.need, e.named, e.label, entryCharacters(e).map(c => c.name.toLowerCase())]; })()")
+        check("a joined unit can have a size (+ Masters of the Maelstrom (5))", entry[0] == {"chosen": 10, "abaddon the despoiler": 1, "masters of the maelstrom": 5} and entry[1] == ["Abaddon The Despoiler", "Masters of the Maelstrom"] and entry[2].endswith("Masters of the Maelstrom (5)"), str(entry))
+        check("Masters of the Maelstrom is no CHARACTER: only Abaddon counts as one", entry[3] == ["abaddon the despoiler"], str(entry[3]))
+        check("Traitor Enforcer (2) needs 2 models", ev(pg, "parseEntry('Traitor Guardsmen Squad (10) + Traitor Enforcer (2)').need['traitor enforcer']") == 2)
+        check("the collection lists each unit once, without sizes", ev(pg, "catalog().every(c => !c.key.includes('(')) && catalog().some(c => c.key === 'masters of the maelstrom')"))
+        check("the sheet's 'Abbdon' typo is fixed", ev(pg, "SPAWN.standard['13+'].includes('Chaos Terminator Squad (10) + Abaddon the Despoiler') && !JSON.stringify(SPAWN).includes('Abbdon')"))
+        csm = ev(pg, """(() => { const f = k => { const p = hordeProfile(k); return { charges: p.charges, noGuns: p.chargesWithoutGuns, rule: p.factionRule, ignored: p.ignored, command: p.command, warlord: p.u.warlord || null, last: p.lastResort, leader: p.u.leader || [] }; };
+          return Object.fromEntries(Object.keys(UNITS.units).map(k => [k, f(k)])); })()""")
+        check("Accursed Cultists charge: no ranged weapons at all (our reading of 5.7)", csm["accursed cultists"]["charges"] and csm["accursed cultists"]["noGuns"])
+        check("Legionaries and Cultist Mobs do not charge, Chosen do", not csm["legionaries"]["charges"] and not csm["cultist mob"]["charges"] and csm["chosen"]["charges"] and not csm["chosen"]["noGuns"])
+        check("loadout counts: a Dark Commune charges (3 of 5), a lone Dark Apostle (1 of 3) and Fabius Bile (1 of 2) do not", csm["dark commune"]["charges"] and not csm["dark apostle"]["charges"] and not csm["fabius bile"]["charges"])
+        check("abilities that need a Dark Pact are ignored", "Despoilers" in csm["chaos terminator squad"]["ignored"] and "Unholy Bloodshed" in csm["possessed"]["ignored"] and "Dark Destiny" in csm["abaddon the despoiler"]["ignored"])
+        check("only-CP abilities are ignored, a choice that includes CP is not", "Trophy Taker" in csm["master of executions"]["ignored"] and "Choice Samples" in csm["masters of the maelstrom"]["command"])
+        check("the Heldrake is no AIRCRAFT in 11th, the Noctilith Crown is a FORTIFICATION", csm["heldrake"]["last"] is None and csm["noctilith crown"]["last"] == "Fortification")
+        check("Abaddon must be the Warlord and leads Terminators and Chosen (no 'SUPREME COMMANDER' unit)", csm["abaddon the despoiler"]["warlord"] == "must" and csm["abaddon the despoiler"]["leader"] == ["CHAOS TERMINATOR SQUAD", "CHOSEN"])
+        check("Wonton Slaughter applies to every Chaos Space Marines unit", all(v["rule"] for v in csm.values()))
+        check("Standard sheet + Leader for Raptors lists the jump pack leaders", ev(pg, "attachOptions('raptors', 'leader')") == ["Chaos Lord with Jump Pack", "Haarken Worldclaimer"], str(ev(pg, "attachOptions('raptors', 'leader')")))
+        n_sheets = ev(pg, "(() => { let n = 0; for (const sh of ['standard', 'detailed']) for (const b of BRACKET_KEYS) for (const raw of SPAWN[sh][b]) { if (renderUnitSheet(raw).includes('Horde rules')) n++; } return n; })()")
+        check("every Chaos Space Marines spawn-table entry has a unit sheet with Horde rules", n_sheets == ev(pg, "BRACKET_KEYS.reduce((t, b) => t + SPAWN.standard[b].length + SPAWN.detailed[b].length, 0)"))
+        steps = ev(pg, "['h-command', 'h-fight', 'p-shoot', 'p-fight'].map(st => stepItems(st).join(' '))")
+        check("the rule is reminded in the Horde Fight phase, with no Dark Pacts; not in the Players' phases", "no Dark Pacts" in steps[0] and "Wonton Slaughter" in steps[1] and "no Dark Pacts" in steps[1] and "Wonton Slaughter" not in steps[2] + steps[3] and "So Back" not in steps[2] + steps[3])
+        ev(pg, f"""mutate(s => {{ const z = s.zones;
+          z[0].dice = [4, 3]; rebuildSlots(z[0], s); pickUnit(s, z[0].id, 1, 'Possessed (10)');
+          z[1].dice = [2, 1]; rebuildSlots(z[1], s); pickUnit(s, z[1].id, 1, 'Fellgor Beastmen (10)'); s.horde.push({{ uid: s.uid++, zone: z[1].id, zoneNo: 2, round: 1, raw: 'Accursed Cultists (8)', baseKey: 'accursed cultists', need: {{ 'accursed cultists': 8 }}, bracket: '5-6' }}); startGame(s); s.stage = 'h-charge'; }})""")
+        tab(pg, "turn")
+        panel = pg.inner_text("#main")
+        check("the Charge phase says the Accursed Cultists charge for want of guns", "Charges the closest legal target (it has no ranged weapons)" in panel and "Does not charge" in panel)
+        ev(pg, "mutate(s => { s.stage = 'h-fight'; })")
+        panel = pg.inner_text("#main")
+        check("the Fight phase reminds +1 A for the units that charge", panel.count("Wonton Slaughter: +1 A to its melee attacks if it charged this turn.") == 2, str(panel.count("Wonton Slaughter: +1 A")))
+        tab(pg, "horde")
+        check("the roster shows the faction rule chip", "+1 A on charge" in pg.inner_text("#main"))
+        pg.evaluate("raw => { ui.sheet = { type: 'unit', raw }; render(); }", "Accursed Cultists (8)")
+        check("the Accursed Cultists sheet explains why they charge", "charging is all it can do" in pg.inner_text(".sheet") and "Wonton Slaughter" in pg.inner_text(".sheet"))
+        pg.evaluate("() => { ui.sheet = null; render(); }")
 
         # ---------- Round start runs once ----------
         fresh(pg)
@@ -833,7 +923,24 @@ def main():
         pg.click('[data-act="set"][data-k="players"][data-v="3"]')
         check("changing players after dealing takes the objectives back", ev(pg, "!state.secretDealt && state.players.every(p => !p.secret.choices.length) && state.decks.secret.draw.length === 34"))
         pg.click('[data-act="exp"][data-k="coll"]')
-        check("the collection editor says which unit sizes the tables use", "tables use 5 or 10" in pg.inner_text("#main"))
+        check("an empty collection says any unit can spawn", "any unit can spawn" in pg.inner_text("#main") and pg.locator('input[data-change="coll"]').count() == 0)
+        pg.select_option('select[data-change="coll-add"]', "immortals")
+        check("adding a unit lists it with the largest size the tables use", ev(pg, "state.collection.immortals") == 10 and "tables use 5 or 10" in pg.inner_text(".coll-list"))
+        check("the added unit's model count is focused for typing", ev(pg, "document.activeElement.dataset.key") == "immortals")
+        check("an added unit leaves the add list", pg.locator('select[data-change="coll-add"] option[value="immortals"]').count() == 0)
+        pg.fill('input[data-change="coll"][data-key="immortals"]', "15")
+        pg.locator('input[data-change="coll"][data-key="immortals"]').dispatch_event("change")
+        check("typing a number sets the models owned", ev(pg, "state.collection.immortals") == 15 and "Only this unit can spawn" in pg.inner_text("#main"))
+        pg.select_option('select[data-change="coll-add"]', "necron warriors")
+        pg.click('[data-act="exp"][data-k="coll"]')
+        check("the closed editor sums up the collection", "Immortals 15 · Necron Warriors 20" in pg.inner_text("#main") and "Only these 2 units can spawn" in pg.inner_text("#main"))
+        pg.click('[data-act="exp"][data-k="coll"]')
+        pg.click('[data-act="coll-remove"][data-key="immortals"]')
+        check("Remove takes a unit off the list", ev(pg, "state.collection") == {"necron warriors": 20})
+        pg.fill('input[data-change="coll"][data-key="necron warriors"]', "0")
+        pg.locator('input[data-change="coll"][data-key="necron warriors"]').dispatch_event("change")
+        check("0 models takes a unit off the list too", ev(pg, "state.collection") == {} and "any unit can spawn" in pg.inner_text("#main"))
+        check("unit names keep small words lower case", ev(pg, "(() => { useFaction('chaos-space-marines'); const name = catalogName('chaos lord in terminator armour'); useFaction(state.setup.faction); return name; })()") == "Chaos Lord in Terminator Armour")
 
         # ---------- Layout: no sideways scrolling at phone sizes ----------
         for width, height in ((390, 844), (360, 740)):
@@ -842,7 +949,8 @@ def main():
             ev(pg, """mutate(s => { const z = s.zones;
               z[0].dice = [4, 3]; rebuildSlots(z[0], s); pickUnit(s, z[0].id, 1, 'Ghost Ark + Transported Unit');
               z[1].dice = [3, 3]; rebuildSlots(z[1], s); pickUnit(s, z[1].id, 1, 'Deathmarks (10)');
-              startGame(s); s.stage = 'p-command'; activateMisery(s, 'm07'); revealSecondary(s); dealSecrets(s); s.players[0].sp = 9; s.saved = [{ id: 's01', owner: 0 }]; })""")
+              startGame(s); s.stage = 'p-command'; activateMisery(s, 'm07'); revealSecondary(s); dealSecrets(s); s.players[0].sp = 9; s.saved = [{ id: 's01', owner: 0 }];
+              s.collection = { 'overlord with translocation shroud': 1, "c'tan shard of the void dragon": 1, 'necron warriors': 40, 'ghost ark': 2, deathmarks: 10 }; })""")
             for name in ("turn", "horde", "cards", "players", "setup"):
                 tab(pg, name)
                 if name == "cards":
@@ -859,6 +967,18 @@ def main():
             pg.evaluate("() => { ui.sheet = { type: 'perk', idx: 0 }; render(); }")
             overflow = ev(pg, "(() => { const el = document.querySelector('.sheet'); return el.scrollWidth - el.clientWidth; })()")
             check(f"{width}px saved-card sheet has no horizontal scroll", overflow <= 0, f"overflow {overflow}px")
+            pg.evaluate("() => { ui.sheet = null; render(); }")
+            fresh(pg)
+            tab(pg, "setup")
+            pg.click('[data-act="set"][data-k="faction"][data-v="chaos-space-marines"]')
+            pg.click('[data-act="exp"][data-k="coll"]')
+            pg.select_option('select[data-change="coll-add"]', "heretic astartes daemon prince with wings")
+            overflow = ev(pg, "document.documentElement.scrollWidth - document.documentElement.clientWidth")
+            check(f"{width}px setup tab with Chaos Space Marines has no horizontal scroll", overflow <= 0, f"overflow {overflow}px")
+            for raw in ("Chosen (10) + Abaddon The Despoiler + Masters of the Maelstrom (5)", "Defiler"):
+                pg.evaluate("raw => { ui.sheet = { type: 'unit', raw }; render(); }", raw)
+                overflow = ev(pg, "(() => { const el = document.querySelector('.sheet'); return el.scrollWidth - el.clientWidth; })()")
+                check(f"{width}px unit sheet for {raw} has no horizontal scroll", overflow <= 0, f"overflow {overflow}px")
             pg.evaluate("() => { ui.sheet = null; render(); }")
         pg.set_viewport_size({"width": 390, "height": 844})
 

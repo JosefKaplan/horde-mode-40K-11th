@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Builds the Horde's spawn tables and unit data from the source files in reference/<faction>/ and embeds them in index.html.
+"""Builds every Horde faction's spawn tables and unit data from the source files in reference/<faction>/ and embeds them
+in index.html, keyed by faction (the app's Setup tab picks one).
 
-    python3 tools/embed_data.py            # the faction in DEFAULT_FACTION
-    python3 tools/embed_data.py necrons
+    python3 tools/embed_data.py            # every faction in FACTIONS
 
 The sources are other people's data and are never committed: reference/ is git-ignored. When a source file is missing,
 the script prints the command that downloads it. Download them yourself (see README.md, "Updating the data"); this script
@@ -12,7 +12,7 @@ Reads   reference/<faction>/spawn-standard.csv     DigitalBeef's spawn brackets,
         reference/<faction>/spawn-detailed.csv     DigitalBeef's spawn brackets, Detailed tab
         reference/<faction>/wahapedia-datasheets.html   Wahapedia's 11th edition datasheets page for the faction
 Writes  the blocks between /*SPAWN_DATA_START*/ ... /*SPAWN_DATA_END*/ and /*UNIT_DATA_START*/ ... /*UNIT_DATA_END*/
-        in index.html.
+        in index.html: one object per block, {faction: data}.
 
 From the datasheets it keeps only the units that appear in the spawn tables, and only what the Horde needs: stat lines,
 weapon profiles and keywords, unit keywords, core abilities, the names of datasheet abilities with tags we derive from
@@ -30,16 +30,19 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SHEET_ID = "1LXfBsLU7fAgLwlA4bTLZSH1JyBc4K_8yqoL77HHGuw4"
-# One entry per Horde faction. Sheet tab ids: see CLAUDE.md, "Adding a faction".
+# One entry per Horde faction, in the order the app's Setup tab lists them. Sheet tab ids: see CLAUDE.md, "Adding a
+# faction". "typos" are misspelt unit names in the sheet, fixed as it is read: tell DigitalBeef, and delete the entry when
+# the script warns that the sheet no longer has it.
 FACTIONS = {
     "necrons": {"name": "Necrons", "gid_standard": "2043610988", "gid_detailed": "216374006", "wahapedia": "necrons"},
+    "chaos-space-marines": {"name": "Chaos Space Marines", "gid_standard": "585202162", "gid_detailed": "1732797717",
+                            "wahapedia": "chaos-space-marines", "typos": {"Abbdon the Despoiler": "Abaddon the Despoiler"}},
 }
-DEFAULT_FACTION = "necrons"
 BRACKET_KEYS = ["3-4", "5-6", "7-9", "10+", "13+"]
 PLACEHOLDERS = {"leader", "support", "transported unit"}
 STAT_NAMES = ["M", "T", "SV", "W", "LD", "OC"]
 SECTION_HEADERS = {"CORE ABILITIES", "ARMY RULES", "ABILITIES", "WARGEAR OPTIONS", "WARGEAR ABILITIES", "UNIT COMPOSITION",
-                   "LEADER", "SUPPORT", "TRANSPORT", "DEPLOYMENT", "FORTIFICATION", "KEYWORDS"}
+                   "LEADER", "SUPPORT", "TRANSPORT", "DEPLOYMENT", "FORTIFICATION", "KEYWORDS", "SUPREME COMMANDER"}
 BLOCK_TAGS = {"p", "div", "br", "tr", "li", "table", "td", "th", "ul"}
 SPAWN_MARKERS = ("/*SPAWN_DATA_START*/", "/*SPAWN_DATA_END*/")
 UNIT_MARKERS = ("/*UNIT_DATA_START*/", "/*UNIT_DATA_END*/")
@@ -69,10 +72,11 @@ def norm(name):
 
 # ---------------------------------------------------------------- spawn tables (DigitalBeef CSV)
 
-def read_sheet(path):
+def read_sheet(path, typos=None):
+    """Returns (last updated, {bracket: [cells]}, the typos it fixed)."""
     with open(path, newline="", encoding="utf-8") as handle:
         rows = list(csv.reader(handle))
-    updated, header_row = "", None
+    updated, header_row, fixed = "", None, set()
     for index, row in enumerate(rows):
         if len(row) > 4 and row[1].strip() == "Last Updated:":
             updated = row[4].strip()
@@ -85,9 +89,13 @@ def read_sheet(path):
     for row in rows[header_row + 1:]:
         for column, key in enumerate(BRACKET_KEYS, start=1):
             cell = row[column].strip() if len(row) > column else ""
+            for wrong, right in (typos or {}).items():
+                if wrong in cell:
+                    cell = cell.replace(wrong, right)
+                    fixed.add(wrong)
             if cell:
                 brackets[key].append(cell)
-    return updated, brackets
+    return updated, brackets, fixed
 
 
 def unit_names(tables):
@@ -190,9 +198,13 @@ def parse_keywords(block):
 def ability_tags(text, army_rules):
     """Tags we derive from an ability's text. 'army-rule' and 'stratagem' mean the Horde cannot use it (rules 3.1, 5.1)."""
     tags = []
-    if any(rule in text for rule in army_rules):
+    # The rule is "Dark Pacts", the abilities say "makes a Dark Pact": match the singular too.
+    if any(re.sub(r"s$", "", rule) in text for rule in army_rules):
         tags.append("army-rule")
-    if re.search(r"Stratagem|\bCP\b", text):
+    # The Horde uses no Stratagems and gains no CP (rules 3.1). An ability whose only effect is gaining CP ("you gain
+    # 1CP") does nothing for it; one where CP is one of several choices still works.
+    gains_cp_only = re.search(r"\bgain \d+ ?CP\b", text) and "one of the following" not in text
+    if re.search(r"Stratagem|\bCP\b", text) or gains_cp_only:
         tags.append("stratagem")
     if re.search(r"Command phase", text):
         tags.append("command")
@@ -209,15 +221,29 @@ def most_models(comp_line):
     return max(int(n) for n in re.findall(r"\d+", comp_line.split(" ", 1)[0]))
 
 
+def singular(name):
+    """'legionaries' -> 'legionary', 'fellgor beastmen' -> 'fellgor beastman', 'havocs' -> 'havoc': loadout lines name one
+    model ('Every Legionary'), composition lines name several ('4-9 Legionaries')."""
+    return re.sub(r"s$", "", re.sub(r"men$", "man", re.sub(r"ies$", "y", name)))
+
+
 def parse_loadout(line, comp):
     """'Every model is equipped with: a; b.' -> {'n': models carrying it, 'items': ['a', 'b']}.
-    'Every Triarchal Menhir is equipped with: ...' counts only the matching models from the composition lines."""
+    'Every Triarchal Menhir is ...' and 'The Dark Apostle is ...' count the matching models from the composition lines;
+    '2 Havocs are equipped with: ...' counts 2. Some datasheets separate the items with commas instead of semicolons."""
     subject, items = line.split("equipped with:", 1)
-    subject = re.sub(r"^(Every|This|Each)\s+", "", subject.replace(" is ", " ").replace(" are ", " ").strip()).strip().lower()
-    names = [re.sub(r"\s+", " ", re.sub(r"^[\d\-–]+\s+", "", c)).split(" – ")[0].lower() for c in comp]
-    matches = [most_models(c) for c, n in zip(comp, names) if subject.rstrip("s") and subject.rstrip("s") in n]
-    count = matches[0] if subject not in ("model", "") and matches else sum(most_models(c) for c in comp) or 1
-    cleaned = [re.sub(r"^\d+\s+", "", item.strip().rstrip(".")).lower() for item in items.split(";")]
+    subject = re.sub(r"\s+(is|are)$", "", subject.strip())
+    stated = re.match(r"^(\d+)\s", subject)
+    subject = singular(re.sub(r"^(Every|This|Each|The|\d+)\s+", "", subject).strip().lower())
+    names = [singular(re.sub(r"\s+", " ", re.sub(r"^[\d\-–]+\s+", "", c)).split(" – ")[0].lower()) for c in comp]
+    matches = [most_models(c) for c, n in zip(comp, names) if subject and subject in n]
+    if stated:
+        count = int(stated.group(1))
+    elif subject not in ("model", "") and matches:
+        count = matches[0]
+    else:
+        count = sum(most_models(c) for c in comp) or 1
+    cleaned = [re.sub(r"^\d+\s+", "", item.strip().rstrip(".")).lower() for item in re.split(r"[;,]", items)]
     return {"n": count, "items": [item for item in cleaned if item]}
 
 
@@ -228,7 +254,9 @@ def parse_sections(lines):
     for line in lines[start:]:
         is_header = line in SECTION_HEADERS or line.startswith("KEYWORDS") or line.startswith("DAMAGED:") or (
             line.isupper() and len(line) < 40 and not line.startswith("YOUR") and ";" not in line and not re.match(r"^[\d\-–]", line))
-        if is_header and not (current and current[0] in ("LEADER", "SUPPORT") and line.isupper() and not line.startswith("KEYWORDS")):
+        # Inside LEADER and SUPPORT every upper-case line is a unit name, unless it is a known header (SUPREME COMMANDER).
+        in_attach_list = current and current[0] in ("LEADER", "SUPPORT") and line.isupper() and line not in SECTION_HEADERS
+        if is_header and not (in_attach_list and not line.startswith("KEYWORDS")):
             current = [line, []]
             sections.append(current)
         elif current:
@@ -267,7 +295,7 @@ def parse_datasheet(block):
                     unit["abilities"][-1]["_text"] += " " + line
         elif header == "UNIT COMPOSITION":
             body = body[:next((i for i, line in enumerate(body) if line.startswith("YOUR")), len(body))]
-            unit["comp"] = [line for line in body if re.match(r"^\d", line)]
+            unit["comp"] = [line for line in body if re.match(r"^\d", line) and "equipped with" not in line]
             unit["loadouts"] = [parse_loadout(line, unit["comp"]) for line in body if "equipped with:" in line]
         elif header in ("LEADER", "SUPPORT"):
             unit["leader" if header == "LEADER" else "support"] = [line for line in body if line.isupper()]
@@ -319,10 +347,13 @@ def build(faction):
     if missing:
         sys.exit("missing source files:\n  " + "\n  ".join(str(p.relative_to(ROOT)) for p in missing)
                  + "\ndownload them with:\n  " + "\n  ".join(download_commands(faction)))
-    standard_updated, standard = read_sheet(paths["standard"])
-    detailed_updated, detailed = read_sheet(paths["detailed"])
+    typos = FACTIONS[faction].get("typos", {})
+    standard_updated, standard, fixed_standard = read_sheet(paths["standard"], typos)
+    detailed_updated, detailed, fixed_detailed = read_sheet(paths["detailed"], typos)
     if standard_updated != detailed_updated:
         print(f"warning: sheets say different update dates ({standard_updated} vs {detailed_updated})")
+    for wrong in sorted(set(typos) - fixed_standard - fixed_detailed):
+        print(f"warning: {faction}: the sheet no longer says {wrong!r}: delete that typo from FACTIONS")
     spawn = {"updated": standard_updated, "standard": standard, "detailed": detailed}
     units = read_units(paths["datasheets"], unit_names([standard, detailed]), faction)
     return spawn, units
@@ -353,6 +384,11 @@ def format_units(units):
     return "\n".join(lines)
 
 
+def format_by_faction(blocks):
+    """{faction: formatted block} -> one object keyed by faction."""
+    return "{\n" + ",\n".join(f"{json.dumps(faction)}: {block}" for faction, block in blocks.items()) + "\n}"
+
+
 def replace_block(page, markers, block):
     start, end = markers
     pattern = re.compile(re.escape(start) + r".*?" + re.escape(end), re.S)
@@ -362,19 +398,19 @@ def replace_block(page, markers, block):
 
 
 def main():
-    faction = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_FACTION
-    if faction not in FACTIONS:
-        sys.exit(f"unknown faction {faction!r}; known: {', '.join(FACTIONS)}")
-    spawn, units = build(faction)
+    if len(sys.argv) > 1:
+        sys.exit("usage: python3 tools/embed_data.py   (embeds every faction in FACTIONS; add a faction there first)")
+    built = {faction: build(faction) for faction in FACTIONS}
     index_path = ROOT / "index.html"
     page = index_path.read_text(encoding="utf-8")
-    page = replace_block(page, SPAWN_MARKERS, format_spawn(spawn))
-    page = replace_block(page, UNIT_MARKERS, format_units(units))
+    page = replace_block(page, SPAWN_MARKERS, format_by_faction({f: format_spawn(spawn) for f, (spawn, _) in built.items()}))
+    page = replace_block(page, UNIT_MARKERS, format_by_faction({f: format_units(units) for f, (_, units) in built.items()}))
     index_path.write_text(page, encoding="utf-8")
-    print(f"{FACTIONS[faction]['name']}: {len(units['units'])} datasheets ({units['version']}), army rules {units['armyRules']}")
-    print(f"Sheet last updated: {spawn['updated']}")
-    for sheet in ("standard", "detailed"):
-        print(f"  {sheet:9}", {key: len(spawn[sheet][key]) for key in BRACKET_KEYS})
+    for faction, (spawn, units) in built.items():
+        print(f"{FACTIONS[faction]['name']}: {len(units['units'])} datasheets ({units['version']}), army rules {units['armyRules']}")
+        print(f"  sheet last updated: {spawn['updated']}")
+        for sheet in ("standard", "detailed"):
+            print(f"  {sheet:9}", {key: len(spawn[sheet][key]) for key in BRACKET_KEYS})
 
 
 if __name__ == "__main__":
